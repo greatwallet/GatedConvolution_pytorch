@@ -4,9 +4,8 @@ import torch.nn.functional as F
 #from models.sa_gan_l2h_unet import InpaintRUNNet, InpaintSADirciminator
 from models.sa_gan import InpaintSANet, InpaintSADirciminator
 from models.loss import SNDisLoss, SNGenLoss, ReconLoss, PerceptualLoss, StyleLoss
-from util.logger import TensorBoardLogger
 from util.config import Config
-from data.inpaint_dataset import InpaintDataset
+from data.simple_inpaint_dataset import SimpleInpaintDataset
 from util.evaluation import AverageMeter
 from util.util import load_consistent_state_dict
 from models.vgg import vgg16_bn
@@ -25,8 +24,9 @@ config = Config(sys.argv[1])
 logger = logging.getLogger(__name__)
 time_stamp = time.strftime('%Y%m%d%H%M', time.localtime(time.time()))
 log_dir = 'model_logs/test_{}_{}'.format(time_stamp, config.LOG_DIR)
-result_dir = 'result_logs/{}'.format(config.MODEL_RESTORE[:config.MODEL_RESTORE.find('/')])
-#tensorboardlogger = TensorBoardLogger(log_dir)
+os.makedirs(log_dir, exist_ok=True)
+result_dir = 'result_logs/{}'.format(config.MODEL_RESTORE[config.MODEL_RESTORE.find('/')+1:config.MODEL_RESTORE.find('.')])
+os.makedirs(result_dir, exist_ok=True)
 cuda0 = torch.device('cuda:{}'.format(config.GPU_IDS[0]))
 cuda1 = torch.device('cuda:{}'.format(config.GPU_IDS[1]))
 cpu0 = torch.device('cpu')
@@ -68,9 +68,15 @@ def validate(nets, loss_terms, opts, dataloader, epoch, network_type, devices=(c
     netD.train()
     end = time.time()
     val_save_dir = os.path.join(result_dir, "val_{}_{}".format(epoch, batch_n if isinstance(batch_n, str) else batch_n+1))
+    os.makedirs(val_save_dir, exist_ok=True)
     val_save_real_dir = os.path.join(val_save_dir, "real")
+    os.makedirs(val_save_real_dir, exist_ok=True)
     val_save_gen_dir = os.path.join(val_save_dir, "gen")
+    os.makedirs(val_save_gen_dir, exist_ok=True)
     val_save_comp_dir = os.path.join(val_save_dir, "comp")
+    os.makedirs(val_save_comp_dir, exist_ok=True)
+    val_save_mask_dir = os.path.join(val_save_dir, "mask")
+    os.makedirs(val_save_mask_dir, exist_ok=True)
     for size in SIZES_TAGS:
         if not os.path.exists(os.path.join(val_save_real_dir, size)):
             os.makedirs(os.path.join(val_save_real_dir, size))
@@ -78,6 +84,8 @@ def validate(nets, loss_terms, opts, dataloader, epoch, network_type, devices=(c
             os.makedirs(os.path.join(val_save_gen_dir, size))
         if not os.path.exists(os.path.join(val_save_comp_dir, size)):
             os.makedirs(os.path.join(val_save_comp_dir, size))
+        if not os.path.exists(os.path.join(val_save_mask_dir, size)):
+            os.makedirs(os.path.join(val_save_mask_dir, size))
     info = {}
     t = 0
     for i, (ori_imgs, ori_masks) in enumerate(dataloader):
@@ -87,8 +95,7 @@ def validate(nets, loss_terms, opts, dataloader, epoch, network_type, devices=(c
 
         for s_i, size in enumerate(TRAIN_SIZES):
 
-            masks = ori_masks['val']
-            masks = F.interpolate(masks, size)
+            masks = F.interpolate(ori_masks, size)
             masks = (masks > 0).type(torch.FloatTensor)
             imgs = F.interpolate(ori_imgs, size)
             if imgs.size(1) != 3:
@@ -153,14 +160,21 @@ def validate(nets, loss_terms, opts, dataloader, epoch, network_type, devices=(c
             real_img = img2photo(imgs)
             gen_img = img2photo(recon_imgs)
             comp_img = img2photo(complete_imgs)
-
+            mask_img = img2photo(masks)
+            print(comp_img.shape)
+            print(mask_img.shape)
             real_img = Image.fromarray(real_img[0].astype(np.uint8))
             gen_img = Image.fromarray(gen_img[0].astype(np.uint8))
             comp_img = Image.fromarray(comp_img[0].astype(np.uint8))
+            mask_img = Image.fromarray(mask_img[0].astype(np.uint8).squeeze())
             real_img.save(os.path.join(val_save_real_dir, SIZES_TAGS[s_i], "{}.png".format(i)))
             gen_img.save(os.path.join(val_save_gen_dir, SIZES_TAGS[s_i], "{}.png".format(i)))
             comp_img.save(os.path.join(val_save_comp_dir, SIZES_TAGS[s_i], "{}.png".format(i)))
-
+            mask_img.save(os.path.join(val_save_mask_dir, SIZES_TAGS[s_i], "{}.png".format(i)))
+            # real_img.save('./{}_real.png'.format(i))
+            # gen_img.save('./{}_gen.png'.format(i))
+            # comp_img.save('./{}_comp.png'.format(i))
+            # mask_img.save('./{}_mask.png'.format(i))
             end = time.time()
 
 
@@ -171,11 +185,8 @@ def main():
 
     # Dataset setting
     logger.info("Initialize the dataset...")
-    val_dataset = InpaintDataset(config.DATA_FLIST[dataset_type][1],\
-                                    {mask_type:config.DATA_FLIST[config.MASKDATASET][mask_type][1] for mask_type in ('val',)}, \
-                                    resize_shape=tuple(config.IMG_SHAPES), random_bbox_shape=config.RANDOM_BBOX_SHAPE, \
-                                    random_bbox_margin=config.RANDOM_BBOX_MARGIN,
-                                    random_ff_setting=config.RANDOM_FF_SETTING)
+    val_dataset = SimpleInpaintDataset(config.DATA_FLIST[dataset_type][1],\
+                                    config.DATA_FLIST[config.MASKDATASET][1])
     val_loader = val_dataset.loader(batch_size=1, shuffle=False,
                                         num_workers=1)
     #print(len(val_loader))
@@ -186,7 +197,7 @@ def main():
 
     # Define the Network Structure
     logger.info("Define the Network Structure and Losses")
-    whole_model_path = 'model_logs/{}'.format(config.MODEL_RESTORE)
+    whole_model_path = '{}'.format(config.MODEL_RESTORE)
     nets = torch.load(whole_model_path)
     netG_state_dict, netD_state_dict = nets['netG_state_dict'], nets['netD_state_dict']
     if config.NETWORK_TYPE == "l2h_unet":

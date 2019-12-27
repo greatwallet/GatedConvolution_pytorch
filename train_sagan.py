@@ -4,9 +4,8 @@ import torch.nn.functional as F
 #from models.gatedconv import InpaintGCNet, InpaintDirciminator
 from models.sa_gan import InpaintSANet, InpaintSADirciminator
 from models.loss import SNDisLoss, SNGenLoss, ReconLoss
-from util.logger import TensorBoardLogger
 from util.config import Config
-from data.inpaint_dataset import InpaintDataset
+from data.simple_inpaint_dataset import SimpleInpaintDataset
 from util.evaluation import AverageMeter
 from evaluation import metrics
 from PIL import Image
@@ -16,14 +15,18 @@ import logging
 import time
 import sys
 import os
+import os.path as osp
 
 # python train inpaint.yml
 config = Config(sys.argv[1])
 logger = logging.getLogger(__name__)
 time_stamp = time.strftime('%Y%m%d%H%M', time.localtime(time.time()))
 log_dir = 'model_logs/{}_{}'.format(time_stamp, config.LOG_DIR)
+if not osp.exists(log_dir):
+    os.makedirs(log_dir, exist_ok=True)
 result_dir = 'result_logs/{}_{}'.format(time_stamp, config.LOG_DIR)
-tensorboardlogger = TensorBoardLogger(log_dir)
+if not osp.exists(result_dir):
+    os.makedirs(result_dir, exist_ok=True)
 cuda0 = torch.device('cuda:{}'.format(config.GPU_ID))
 cpu0 = torch.device('cpu')
 
@@ -67,7 +70,6 @@ def validate(netG, netD, GANLoss, ReconLoss, DLoss, optG, optD, dataloader, epoc
     for i, (imgs, masks) in enumerate(dataloader):
 
         data_time.update(time.time() - end)
-        masks = masks['val']
         #masks = (masks > 0).type(torch.FloatTensor)
 
         imgs, masks = imgs.to(device), masks.to(device)
@@ -132,12 +134,12 @@ def validate(netG, netD, GANLoss, ReconLoss, DLoss, optG, optD, dataloader, epoc
                     real_img.save(os.path.join(val_save_real_dir, "{}.png".format(j)))
                     gen_img.save(os.path.join(val_save_gen_dir, "{}.png".format(j)))
                     j += 1
-                tensorboardlogger.image_summary(tag, images, epoch)
+                # tensorboardlogger.image_summary(tag, images, epoch)
             path1, path2 = val_save_real_dir, val_save_gen_dir
             fid_score = metrics['fid']([path1, path2], cuda=False)
             ssim_score = metrics['ssim']([path1, path2])
-            tensorboardlogger.scalar_summary('val/fid', fid_score.item(), epoch*len(dataloader)+i)
-            tensorboardlogger.scalar_summary('val/ssim', ssim_score.item(), epoch*len(dataloader)+i)
+            # tensorboardlogger.scalar_summary('val/fid', fid_score.item(), epoch*len(dataloader)+i)
+            # tensorboardlogger.scalar_summary('val/ssim', ssim_score.item(), epoch*len(dataloader)+i)
             break
 
         end = time.time()
@@ -160,7 +162,6 @@ def train(netG, netD, GANLoss, ReconLoss, DLoss, optG, optD, dataloader, epoch, 
     end = time.time()
     for i, (imgs, masks) in enumerate(dataloader):
         data_time.update(time.time() - end)
-        masks = masks['random_free_form']
 
         # Optimize Discriminator
         optD.zero_grad(), netD.zero_grad(), netG.zero_grad(), optG.zero_grad()
@@ -169,7 +170,7 @@ def train(netG, netD, GANLoss, ReconLoss, DLoss, optG, optD, dataloader, epoch, 
         imgs = (imgs / 127.5 - 1)
         # mask is 1 on masked region
 
-        coarse_imgs, recon_imgs, attention = netG(imgs, masks)
+        coarse_imgs, recon_imgs = netG(imgs, masks)
         #print(attention.size(), )
         complete_imgs = recon_imgs * masks + imgs * (1 - masks)
 
@@ -216,11 +217,11 @@ def train(netG, netD, GANLoss, ReconLoss, DLoss, optG, optD, dataloader, epoch, 
             # Tensorboard logger for scaler and images
             info_terms = {'WGLoss':whole_loss.item(), 'ReconLoss':r_loss.item(), "GANLoss":g_loss.item(), "DLoss":d_loss.item()}
 
-            for tag, value in info_terms.items():
-                tensorboardlogger.scalar_summary(tag, value, epoch*len(dataloader)+i)
+            # for tag, value in info_terms.items():
+            #     tensorboardlogger.scalar_summary(tag, value, epoch*len(dataloader)+i)
 
-            for tag, value in losses.items():
-                tensorboardlogger.scalar_summary('avg_'+tag, value.avg, epoch*len(dataloader)+i)
+            # for tag, value in losses.items():
+            #     tensorboardlogger.scalar_summary('avg_'+tag, value.avg, epoch*len(dataloader)+i)
 
             def img2photo(imgs):
                 return ((imgs+1)*127.5).transpose(1,2).transpose(2,3).detach().cpu().numpy()
@@ -232,8 +233,8 @@ def train(netG, netD, GANLoss, ReconLoss, DLoss, optG, optD, dataloader, epoch, 
                      'train/whole_imgs':img2photo(torch.cat([ imgs * (1 - masks), coarse_imgs, recon_imgs, imgs, complete_imgs], dim=3))
                      }
 
-            for tag, images in info.items():
-                tensorboardlogger.image_summary(tag, images, epoch*len(dataloader)+i)
+            # for tag, images in info.items():
+            #     tensorboardlogger.image_summary(tag, images, epoch*len(dataloader)+i)
         if (i+1) % config.VAL_SUMMARY_FREQ == 0 and val_datas is not None:
 
             validate(netG, netD, GANLoss, ReconLoss, DLoss, optG, optD, val_datas , epoch, device, batch_n=i)
@@ -248,19 +249,13 @@ def main():
 
     # Dataset setting
     logger.info("Initialize the dataset...")
-    train_dataset = InpaintDataset(config.DATA_FLIST[dataset_type][0],\
-                                      {mask_type:config.DATA_FLIST[config.MASKDATASET][mask_type][0] for mask_type in config.MASK_TYPES}, \
-                                      resize_shape=tuple(config.IMG_SHAPES), random_bbox_shape=config.RANDOM_BBOX_SHAPE, \
-                                      random_bbox_margin=config.RANDOM_BBOX_MARGIN,
-                                      random_ff_setting=config.RANDOM_FF_SETTING)
+    train_dataset = SimpleInpaintDataset(config.DATA_FLIST[dataset_type][0], 
+                                   config.DATA_FLIST[config.MASKDATASET][0])
     train_loader = train_dataset.loader(batch_size=batch_size, shuffle=True,
                                             num_workers=16,pin_memory=True)
 
-    val_dataset = InpaintDataset(config.DATA_FLIST[dataset_type][1],\
-                                    {mask_type:config.DATA_FLIST[config.MASKDATASET][mask_type][1] for mask_type in ('val',)}, \
-                                    resize_shape=tuple(config.IMG_SHAPES), random_bbox_shape=config.RANDOM_BBOX_SHAPE, \
-                                    random_bbox_margin=config.RANDOM_BBOX_MARGIN,
-                                    random_ff_setting=config.RANDOM_FF_SETTING)
+    val_dataset = SimpleInpaintDataset(config.DATA_FLIST[dataset_type][1],\
+                                    config.DATA_FLIST[config.MASKDATASET][1])
     val_loader = val_dataset.loader(batch_size=1, shuffle=False,
                                         num_workers=1)
     #print(len(val_loader))
@@ -307,7 +302,7 @@ def main():
 
     # Start Training
     logger.info("Start Training...")
-    epoch = 50
+    epoch = config.MAXEPOCHS
 
     for i in range(epoch):
         #validate(netG, netD, gan_loss, recon_loss, dis_loss, optG, optD, val_loader, i, device=cuda0)
